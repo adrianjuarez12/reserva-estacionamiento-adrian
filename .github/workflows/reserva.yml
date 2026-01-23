@@ -1,0 +1,303 @@
+name: Reserva Automática de Estacionamiento
+
+on:
+  schedule:
+    # Ejecuta de Domingo (0) a Miércoles (3) a las 00:00 UTC
+    # UTC 00:00 = 7:00 PM Lima (día anterior)
+    # Para ejecutar a medianoche Lima: usar 05:00 UTC
+    - cron: '0 5 * * 0-3'  # 05:00 UTC = 00:00 Lima
+  
+  workflow_dispatch:  # Permite ejecución manual desde GitHub
+
+env:
+  BOOKING_EMAIL: 'Reservadeestacionamiento@pacifico.com.pe'
+  SERVICE_ID: '9cd853f0-540b-4169-9f9f-e260b6691da1'
+  STAFF_MEMBER_ID: '3192680d-3f31-42eb-a0a4-ed2508d7444f'
+  TIMEZONE: 'SA Pacific Standard Time'
+
+jobs:
+  reservar-estacionamiento:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+      
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Instalar dependencias
+        run: |
+          pip install requests pytz
+      
+      - name: Crear script de reserva
+        run: |
+          cat > reserva.py << 'EOF'
+          import requests
+          import json
+          from datetime import datetime, timedelta
+          import pytz
+          import os
+          import sys
+
+          # Configuración desde variables de entorno y secrets
+          BOOKING_EMAIL = os.environ['BOOKING_EMAIL']
+          SERVICE_ID = os.environ['SERVICE_ID']
+          STAFF_MEMBER_ID = os.environ['STAFF_MEMBER_ID']
+          TIMEZONE = os.environ['TIMEZONE']
+
+          # Datos del usuario desde secrets
+          CUSTOMER_NAME = os.environ['CUSTOMER_NAME']
+          CUSTOMER_EMAIL = os.environ['CUSTOMER_EMAIL']
+          CUSTOMER_DNI = os.environ['CUSTOMER_DNI']
+
+          # Cookies desde secrets
+          CLIENT_ID = os.environ['CLIENT_ID']
+          MSAL_CACHE = os.environ['MSAL_CACHE']
+          OIDC = os.environ.get('OIDC', '1')
+
+          def generar_horario(dias_adelante=1, hora_inicio=8, duracion_horas=1):
+              """Genera horario de reserva"""
+              tz = pytz.timezone('America/Lima')
+              fecha_reserva = datetime.now(tz) + timedelta(days=dias_adelante)
+              inicio = fecha_reserva.replace(hour=hora_inicio, minute=0, second=0, microsecond=0)
+              fin = inicio + timedelta(hours=duracion_horas)
+              
+              formato = lambda f: f.strftime('%Y-%m-%dT%H:%M:%S')
+              return formato(inicio), formato(fin)
+
+          def crear_payload(start_time, end_time):
+              """Crea el payload para la API"""
+              return {
+                  "appointment": {
+                      "startTime": {
+                          "dateTime": start_time,
+                          "timeZone": TIMEZONE
+                      },
+                      "endTime": {
+                          "dateTime": end_time,
+                          "timeZone": TIMEZONE
+                      },
+                      "customerTimeZone": TIMEZONE,
+                      "customers": [{
+                          "name": CUSTOMER_NAME,
+                          "emailAddress": CUSTOMER_EMAIL,
+                          "phone": "",
+                          "notes": "",
+                          "timeZone": TIMEZONE,
+                          "answeredCustomQuestions": [{
+                              "customQuestion": {
+                                  "id": "1f193f48-a800-44b6-a4dc-4d4d8a76e4db",
+                                  "questionText": "DNI",
+                                  "answerOptions": [],
+                                  "answerInputType": "ANSWER_INPUT_TYPE_TEXT"
+                              },
+                              "answer": CUSTOMER_DNI,
+                              "isRequired": True,
+                              "selectedOptions": []
+                          }],
+                          "smsNotificationsEnabled": False,
+                          "instanceId": "",
+                          "price": 0,
+                          "priceType": "SERVICEDEFAULTPRICETYPES_NOT_SET",
+                          "location": {
+                              "displayName": "",
+                              "address": {"street": "", "type": "Other"}
+                          }
+                      }],
+                      "staffMemberIds": [STAFF_MEMBER_ID],
+                      "serviceId": SERVICE_ID,
+                      "isLocationOnline": False,
+                      "price": 0,
+                      "priceType": "SERVICEDEFAULTPRICETYPES_NOT_SET",
+                      "smsNotificationsEnabled": False,
+                      "isAllDay": False,
+                      "additionalRecipients": [],
+                      "bookingFormInfoList": [],
+                      "trackingDataId": "",
+                      "verificationCode": ""
+                  }
+              }
+
+          def hacer_reserva():
+              """Realiza la reserva"""
+              print(f"🚗 Iniciando reserva de estacionamiento...")
+              print(f"📅 Usuario: {CUSTOMER_NAME}")
+              print(f"📧 Email: {CUSTOMER_EMAIL}")
+              print(f"🆔 DNI: {CUSTOMER_DNI}")
+              
+              # Generar horario
+              start_time, end_time = generar_horario()
+              print(f"⏰ Horario: {start_time} - {end_time}")
+              
+              # Crear payload
+              payload = crear_payload(start_time, end_time)
+              
+              # Headers
+              headers = {
+                  'Content-Type': 'application/json; charset=utf-8',
+                  'Cookie': f'ClientId={CLIENT_ID}; msal.cache.encryption={MSAL_CACHE}; OIDC={OIDC}',
+                  'accept': '*/*',
+                  'origin': 'https://outlook.office365.com',
+                  'x-anchormailbox': BOOKING_EMAIL,
+                  'x-owa-canary': 'X-OWA-CANARY_cookie_is_null_or_empty',
+                  'x-req-source': 'BookingsC2',
+                  'sec-fetch-dest': 'empty',
+                  'sec-fetch-mode': 'cors',
+                  'sec-fetch-site': 'same-origin'
+              }
+              
+              # URL
+              url = f'https://outlook.office365.com/BookingsService/api/V1/bookingBusinessesc2/{BOOKING_EMAIL}/appointments'
+              
+              try:
+                  response = requests.post(url, headers=headers, json=payload, timeout=30)
+                  
+                  if response.status_code == 200:
+                      resultado = response.json()
+                      appointment = resultado['appointment']
+                      
+                      print("\n✅ RESERVA EXITOSA!")
+                      print(f"   ID: {appointment['id']}")
+                      print(f"   Servicio: {appointment['serviceName']}")
+                      print(f"   Ubicación: {appointment['serviceLocation']['displayName']}")
+                      print(f"   Inicio: {appointment['startTime']['dateTime']}")
+                      print(f"   Fin: {appointment['endTime']['dateTime']}")
+                      print(f"   Ocupación: {appointment['filledAttendeesCount']}/{appointment['maximumAttendeesCount']}")
+                      
+                      # Guardar resultado para el siguiente step
+                      with open('resultado.json', 'w') as f:
+                          json.dump({
+                              'success': True,
+                              'appointment_id': appointment['id'],
+                              'service_name': appointment['serviceName'],
+                              'location': appointment['serviceLocation']['displayName'],
+                              'start_time': appointment['startTime']['dateTime'],
+                              'end_time': appointment['endTime']['dateTime'],
+                              'filled': appointment['filledAttendeesCount'],
+                              'max': appointment['maximumAttendeesCount']
+                          }, f, indent=2)
+                      
+                      return 0
+                  else:
+                      print(f"\n❌ ERROR: Status code {response.status_code}")
+                      print(f"   Respuesta: {response.text}")
+                      
+                      with open('resultado.json', 'w') as f:
+                          json.dump({
+                              'success': False,
+                              'error': f"HTTP {response.status_code}",
+                              'message': response.text
+                          }, f, indent=2)
+                      
+                      return 1
+                      
+              except Exception as e:
+                  print(f"\n❌ EXCEPCIÓN: {str(e)}")
+                  
+                  with open('resultado.json', 'w') as f:
+                      json.dump({
+                          'success': False,
+                          'error': 'Exception',
+                          'message': str(e)
+                      }, f, indent=2)
+                  
+                  return 1
+
+          if __name__ == '__main__':
+              sys.exit(hacer_reserva())
+          EOF
+      
+      - name: Ejecutar reserva
+        env:
+          CUSTOMER_NAME: ${{ secrets.CUSTOMER_NAME }}
+          CUSTOMER_EMAIL: ${{ secrets.CUSTOMER_EMAIL }}
+          CUSTOMER_DNI: ${{ secrets.CUSTOMER_DNI }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          MSAL_CACHE: ${{ secrets.MSAL_CACHE }}
+          OIDC: ${{ secrets.OIDC }}
+        run: python reserva.py
+        continue-on-error: true
+      
+      - name: Leer resultado
+        id: resultado
+        run: |
+          if [ -f resultado.json ]; then
+            cat resultado.json
+            echo "RESULTADO<<EOF" >> $GITHUB_OUTPUT
+            cat resultado.json >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Enviar notificación por email (éxito)
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: '✅ Reserva de Estacionamiento Confirmada - ${{ github.run_number }}'
+          to: ${{ secrets.CUSTOMER_EMAIL }}
+          from: ${{ secrets.EMAIL_USERNAME }}
+          body: |
+            ✅ RESERVA EXITOSA
+            
+            La reserva de estacionamiento se completó correctamente.
+            
+            👤 Usuario: ${{ secrets.CUSTOMER_NAME }}
+            📧 Email: ${{ secrets.CUSTOMER_EMAIL }}
+            🆔 DNI: ${{ secrets.CUSTOMER_DNI }}
+            
+            📍 Ubicación: Estacionamiento Rivera Navarrete (ERN)
+            
+            🎫 Recuerda: Al salir, ve a la recepción del Edificio Tamayo con tu ticket del ERN
+            para recibir tu Ticket Prime.
+            
+            ---
+            Ejecutado por GitHub Actions
+            Run #${{ github.run_number }}
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      
+      - name: Enviar notificación por email (error)
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: '❌ Error en Reserva de Estacionamiento - ${{ github.run_number }}'
+          to: ${{ secrets.CUSTOMER_EMAIL }}
+          from: ${{ secrets.EMAIL_USERNAME }}
+          body: |
+            ❌ ERROR EN LA RESERVA
+            
+            Hubo un problema al intentar reservar el estacionamiento.
+            
+            Posibles causas:
+            1. Cookies de Office 365 expiradas
+            2. Ya existe una reserva para ese horario
+            3. No hay espacios disponibles
+            4. Problema con la API de Microsoft
+            
+            🔧 Acción requerida:
+            - Revisa los logs de GitHub Actions
+            - Actualiza las cookies si es necesario
+            - Intenta hacer la reserva manualmente
+            
+            ---
+            Ejecutado por GitHub Actions
+            Run #${{ github.run_number }}
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      
+      - name: Guardar resultado como artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-reserva-${{ github.run_number }}
+          path: resultado.json
+          retention-days: 30
