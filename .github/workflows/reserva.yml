@@ -2,10 +2,8 @@ name: Reserva Automática de Estacionamiento
 
 on:
   schedule:
-    # Ejecuta de Domingo (0) a Miércoles (3) a las 00:00 UTC
-    # UTC 00:00 = 7:00 PM Lima (día anterior)
-    # Para ejecutar a medianoche Lima: usar 05:00 UTC
-    - cron: '0 5 * * 0-3'  # 05:00 UTC = 00:00 Lima
+    # Ejecuta de Domingo (0) a Miércoles (3) a las 00:00 Lima (05:00 UTC)
+    - cron: '0 5 * * 0-3'
   
   workflow_dispatch:  # Permite ejecución manual desde GitHub
 
@@ -42,7 +40,7 @@ jobs:
           import os
           import sys
 
-          # Configuración desde variables de entorno y secrets
+          # Configuración desde variables de entorno
           BOOKING_EMAIL = os.environ['BOOKING_EMAIL']
           SERVICE_ID = os.environ['SERVICE_ID']
           STAFF_MEMBER_ID = os.environ['STAFF_MEMBER_ID']
@@ -52,11 +50,6 @@ jobs:
           CUSTOMER_NAME = os.environ['CUSTOMER_NAME']
           CUSTOMER_EMAIL = os.environ['CUSTOMER_EMAIL']
           CUSTOMER_DNI = os.environ['CUSTOMER_DNI']
-
-          # Cookies desde secrets
-          CLIENT_ID = os.environ['CLIENT_ID']
-          MSAL_CACHE = os.environ['MSAL_CACHE']
-          OIDC = os.environ.get('OIDC', '1')
 
           def generar_horario(dias_adelante=1, hora_inicio=8, duracion_horas=1):
               """Genera horario de reserva"""
@@ -135,10 +128,9 @@ jobs:
               # Crear payload
               payload = crear_payload(start_time, end_time)
               
-              # Headers
+              # Headers (sin cookies de autenticación)
               headers = {
                   'Content-Type': 'application/json; charset=utf-8',
-                  'Cookie': f'ClientId={CLIENT_ID}; msal.cache.encryption={MSAL_CACHE}; OIDC={OIDC}',
                   'accept': '*/*',
                   'origin': 'https://outlook.office365.com',
                   'x-anchormailbox': BOOKING_EMAIL,
@@ -167,7 +159,7 @@ jobs:
                       print(f"   Fin: {appointment['endTime']['dateTime']}")
                       print(f"   Ocupación: {appointment['filledAttendeesCount']}/{appointment['maximumAttendeesCount']}")
                       
-                      # Guardar resultado para el siguiente step
+                      # Guardar resultado
                       with open('resultado.json', 'w') as f:
                           json.dump({
                               'success': True,
@@ -215,83 +207,20 @@ jobs:
           CUSTOMER_NAME: ${{ secrets.CUSTOMER_NAME }}
           CUSTOMER_EMAIL: ${{ secrets.CUSTOMER_EMAIL }}
           CUSTOMER_DNI: ${{ secrets.CUSTOMER_DNI }}
-          CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          MSAL_CACHE: ${{ secrets.MSAL_CACHE }}
-          OIDC: ${{ secrets.OIDC }}
         run: python reserva.py
-        continue-on-error: true
       
-      - name: Leer resultado
-        id: resultado
+      - name: Mostrar resultado
+        if: always()
         run: |
+          echo "=========================================="
+          echo "RESULTADO DE LA RESERVA"
+          echo "=========================================="
           if [ -f resultado.json ]; then
             cat resultado.json
-            echo "RESULTADO<<EOF" >> $GITHUB_OUTPUT
-            cat resultado.json >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "No se generó archivo de resultado"
           fi
-      
-      - name: Enviar notificación por email (éxito)
-        if: success()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 587
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: '✅ Reserva de Estacionamiento Confirmada - ${{ github.run_number }}'
-          to: ${{ secrets.CUSTOMER_EMAIL }}
-          from: ${{ secrets.EMAIL_USERNAME }}
-          body: |
-            ✅ RESERVA EXITOSA
-            
-            La reserva de estacionamiento se completó correctamente.
-            
-            👤 Usuario: ${{ secrets.CUSTOMER_NAME }}
-            📧 Email: ${{ secrets.CUSTOMER_EMAIL }}
-            🆔 DNI: ${{ secrets.CUSTOMER_DNI }}
-            
-            📍 Ubicación: Estacionamiento Rivera Navarrete (ERN)
-            
-            🎫 Recuerda: Al salir, ve a la recepción del Edificio Tamayo con tu ticket del ERN
-            para recibir tu Ticket Prime.
-            
-            ---
-            Ejecutado por GitHub Actions
-            Run #${{ github.run_number }}
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      
-      - name: Enviar notificación por email (error)
-        if: failure()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 587
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: '❌ Error en Reserva de Estacionamiento - ${{ github.run_number }}'
-          to: ${{ secrets.CUSTOMER_EMAIL }}
-          from: ${{ secrets.EMAIL_USERNAME }}
-          body: |
-            ❌ ERROR EN LA RESERVA
-            
-            Hubo un problema al intentar reservar el estacionamiento.
-            
-            Posibles causas:
-            1. Cookies de Office 365 expiradas
-            2. Ya existe una reserva para ese horario
-            3. No hay espacios disponibles
-            4. Problema con la API de Microsoft
-            
-            🔧 Acción requerida:
-            - Revisa los logs de GitHub Actions
-            - Actualiza las cookies si es necesario
-            - Intenta hacer la reserva manualmente
-            
-            ---
-            Ejecutado por GitHub Actions
-            Run #${{ github.run_number }}
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          echo "=========================================="
       
       - name: Guardar resultado como artifact
         if: always()
