@@ -1,11 +1,9 @@
 name: Reserva Automática de Estacionamiento
-
 on:
   schedule:
     # Ejecuta de Domingo (0) a Miércoles (3) a las 00:00 Lima (05:00 UTC)
     - cron: '0 5 * * 0-3'
-  
-  workflow_dispatch:  # Permite ejecución manual desde GitHub
+  workflow_dispatch:
 
 env:
   BOOKING_EMAIL: 'Reservadeestacionamiento@pacifico.com.pe'
@@ -16,63 +14,161 @@ env:
 jobs:
   reservar-estacionamiento:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
-      
+
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Instalar dependencias
-        run: |
-          pip install requests pytz
-      
+        run: pip install requests pytz
+
       - name: Crear script de reserva
         run: |
           cat > reserva.py << 'EOF'
           import requests
           import json
+          import re
           from datetime import datetime, timedelta
           import pytz
           import os
           import sys
 
-          # Configuración desde variables de entorno
-          BOOKING_EMAIL = os.environ['BOOKING_EMAIL']
-          SERVICE_ID = os.environ['SERVICE_ID']
+          BOOKING_EMAIL   = os.environ['BOOKING_EMAIL']
+          SERVICE_ID      = os.environ['SERVICE_ID']
           STAFF_MEMBER_ID = os.environ['STAFF_MEMBER_ID']
-          TIMEZONE = os.environ['TIMEZONE']
+          TIMEZONE        = os.environ['TIMEZONE']
+          CUSTOMER_NAME   = os.environ['CUSTOMER_NAME']
+          CUSTOMER_EMAIL  = os.environ['CUSTOMER_EMAIL']
+          CUSTOMER_DNI    = os.environ['CUSTOMER_DNI']
 
-          # Datos del usuario desde secrets
-          CUSTOMER_NAME = os.environ['CUSTOMER_NAME']
-          CUSTOMER_EMAIL = os.environ['CUSTOMER_EMAIL']
-          CUSTOMER_DNI = os.environ['CUSTOMER_DNI']
+          SESSION = requests.Session()
+          SESSION.headers.update({
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+              'Origin': 'https://outlook.office365.com',
+              'Referer': f'https://outlook.office365.com/book/{BOOKING_EMAIL}/',
+              'x-anchormailbox': BOOKING_EMAIL,
+              'x-req-source': 'BookingsC2',
+          })
 
+          BASE_URL = f'https://outlook.office365.com/BookingsService/api/V1/bookingBusinessesc2/{BOOKING_EMAIL}'
+
+          # ──────────────────────────────────────────
+          # 1. Obtener canary token
+          # ──────────────────────────────────────────
+          def obtener_canary():
+              print("🔑 Obteniendo canary token...")
+              try:
+                  url = f'https://outlook.office365.com/book/{BOOKING_EMAIL}/?ismsaljsauthenabled=true'
+                  r = SESSION.get(url, timeout=30)
+                  # Intentar desde cookie
+                  canary = SESSION.cookies.get('X-OWA-CANARY', '')
+                  # Intentar desde HTML si no vino en cookie
+                  if not canary:
+                      match = re.search(r'"canary"\s*:\s*"([^"]+)"', r.text)
+                      if match:
+                          canary = match.group(1)
+                  if not canary:
+                      match = re.search(r'X-OWA-CANARY["\s:=]+([A-Za-z0-9_\-\.]+)', r.text)
+                      if match:
+                          canary = match.group(1)
+                  if canary:
+                      print(f"   ✅ Canary obtenido: {canary[:20]}...")
+                  else:
+                      print("   ⚠️  Canary no encontrado, continuando sin él")
+                  return canary
+              except Exception as e:
+                  print(f"   ⚠️  Error obteniendo canary: {e}")
+                  return ''
+
+          # ──────────────────────────────────────────
+          # 2. Verificar / descubrir SERVICE_ID
+          # ──────────────────────────────────────────
+          def verificar_servicio(canary):
+              print("🔍 Verificando servicio...")
+              try:
+                  headers = {'x-owa-canary': canary} if canary else {}
+                  r = SESSION.get(f'{BASE_URL}/services', headers=headers, timeout=30)
+                  if r.status_code != 200:
+                      print(f"   ⚠️  No se pudo consultar servicios (HTTP {r.status_code})")
+                      return SERVICE_ID
+                  data = r.json()
+                  servicios = data.get('value', data) if isinstance(data, dict) else data
+                  if not isinstance(servicios, list):
+                      print("   ⚠️  Formato inesperado al listar servicios")
+                      return SERVICE_ID
+                  print(f"   Servicios encontrados: {len(servicios)}")
+                  for s in servicios:
+                      sid = s.get('id', '')
+                      nombre = s.get('displayName', s.get('name', 'Sin nombre'))
+                      print(f"   • [{sid}] {nombre}")
+                      if sid == SERVICE_ID:
+                          print(f"   ✅ SERVICE_ID confirmado: {sid}")
+                          return sid
+                  # Si no coincide, usar el primero disponible
+                  if servicios:
+                      primero = servicios[0].get('id', SERVICE_ID)
+                      print(f"   ⚠️  SERVICE_ID original no encontrado. Usando primero: {primero}")
+                      return primero
+              except Exception as e:
+                  print(f"   ⚠️  Error verificando servicio: {e}")
+              return SERVICE_ID
+
+          # ──────────────────────────────────────────
+          # 3. Verificar / descubrir STAFF_MEMBER_ID
+          # ──────────────────────────────────────────
+          def verificar_staff(canary):
+              print("👤 Verificando staff member...")
+              try:
+                  headers = {'x-owa-canary': canary} if canary else {}
+                  r = SESSION.get(f'{BASE_URL}/staffMembers', headers=headers, timeout=30)
+                  if r.status_code != 200:
+                      print(f"   ⚠️  No se pudo consultar staff (HTTP {r.status_code})")
+                      return STAFF_MEMBER_ID
+                  data = r.json()
+                  staff_list = data.get('value', data) if isinstance(data, dict) else data
+                  if not isinstance(staff_list, list):
+                      print("   ⚠️  Formato inesperado al listar staff")
+                      return STAFF_MEMBER_ID
+                  print(f"   Staff encontrado: {len(staff_list)} miembro(s)")
+                  for s in staff_list:
+                      sid = s.get('id', '')
+                      nombre = s.get('displayName', s.get('name', 'Sin nombre'))
+                      print(f"   • [{sid}] {nombre}")
+                      if sid == STAFF_MEMBER_ID:
+                          print(f"   ✅ STAFF_MEMBER_ID confirmado: {sid}")
+                          return sid
+                  if staff_list:
+                      primero = staff_list[0].get('id', STAFF_MEMBER_ID)
+                      print(f"   ⚠️  STAFF_MEMBER_ID original no encontrado. Usando primero: {primero}")
+                      return primero
+              except Exception as e:
+                  print(f"   ⚠️  Error verificando staff: {e}")
+              return STAFF_MEMBER_ID
+
+          # ──────────────────────────────────────────
+          # 4. Generar horario
+          # ──────────────────────────────────────────
           def generar_horario(dias_adelante=1, hora_inicio=8, duracion_horas=1):
-              """Genera horario de reserva"""
               tz = pytz.timezone('America/Lima')
               fecha_reserva = datetime.now(tz) + timedelta(days=dias_adelante)
               inicio = fecha_reserva.replace(hour=hora_inicio, minute=0, second=0, microsecond=0)
               fin = inicio + timedelta(hours=duracion_horas)
-              
-              formato = lambda f: f.strftime('%Y-%m-%dT%H:%M:%S')
-              return formato(inicio), formato(fin)
+              fmt = lambda f: f.strftime('%Y-%m-%dT%H:%M:%S')
+              return fmt(inicio), fmt(fin)
 
-          def crear_payload(start_time, end_time):
-              """Crea el payload para la API"""
+          # ──────────────────────────────────────────
+          # 5. Construir payload
+          # ──────────────────────────────────────────
+          def crear_payload(start_time, end_time, service_id, staff_id):
               return {
                   "appointment": {
-                      "startTime": {
-                          "dateTime": start_time,
-                          "timeZone": TIMEZONE
-                      },
-                      "endTime": {
-                          "dateTime": end_time,
-                          "timeZone": TIMEZONE
-                      },
+                      "startTime": {"dateTime": start_time, "timeZone": TIMEZONE},
+                      "endTime":   {"dateTime": end_time,   "timeZone": TIMEZONE},
                       "customerTimeZone": TIMEZONE,
                       "customers": [{
                           "name": CUSTOMER_NAME,
@@ -100,8 +196,8 @@ jobs:
                               "address": {"street": "", "type": "Other"}
                           }
                       }],
-                      "staffMemberIds": [STAFF_MEMBER_ID],
-                      "serviceId": SERVICE_ID,
+                      "staffMemberIds": [staff_id],
+                      "serviceId": service_id,
                       "isLocationOnline": False,
                       "price": 0,
                       "priceType": "SERVICEDEFAULTPRICETYPES_NOT_SET",
@@ -114,101 +210,97 @@ jobs:
                   }
               }
 
+          # ──────────────────────────────────────────
+          # 6. Realizar la reserva
+          # ──────────────────────────────────────────
           def hacer_reserva():
-              """Realiza la reserva"""
-              print(f"🚗 Iniciando reserva de estacionamiento...")
-              print(f"📅 Usuario: {CUSTOMER_NAME}")
-              print(f"📧 Email: {CUSTOMER_EMAIL}")
-              print(f"🆔 DNI: {CUSTOMER_DNI}")
-              
-              # Generar horario
+              print("🚗 Iniciando reserva de estacionamiento...")
+              print(f"📅 Usuario : {CUSTOMER_NAME}")
+              print(f"📧 Email   : {CUSTOMER_EMAIL}")
+              print(f"🆔 DNI     : {CUSTOMER_DNI}")
+
+              canary     = obtener_canary()
+              service_id = verificar_servicio(canary)
+              staff_id   = verificar_staff(canary)
+
               start_time, end_time = generar_horario()
-              print(f"⏰ Horario: {start_time} - {end_time}")
-              
-              # Crear payload
-              payload = crear_payload(start_time, end_time)
-              
-              # Headers (sin cookies de autenticación)
+              print(f"⏰ Horario : {start_time} → {end_time}")
+
+              payload = crear_payload(start_time, end_time, service_id, staff_id)
+
               headers = {
                   'Content-Type': 'application/json; charset=utf-8',
                   'accept': '*/*',
-                  'origin': 'https://outlook.office365.com',
-                  'x-anchormailbox': BOOKING_EMAIL,
-                  'x-owa-canary': 'X-OWA-CANARY_cookie_is_null_or_empty',
-                  'x-req-source': 'BookingsC2',
                   'sec-fetch-dest': 'empty',
                   'sec-fetch-mode': 'cors',
-                  'sec-fetch-site': 'same-origin'
+                  'sec-fetch-site': 'same-origin',
               }
-              
-              # URL
-              url = f'https://outlook.office365.com/BookingsService/api/V1/bookingBusinessesc2/{BOOKING_EMAIL}/appointments'
-              
+              if canary:
+                  headers['x-owa-canary'] = canary
+
+              url = f'{BASE_URL}/appointments'
+
               try:
-                  response = requests.post(url, headers=headers, json=payload, timeout=30)
-                  
+                  response = SESSION.post(url, headers=headers, json=payload, timeout=30)
+
                   if response.status_code == 200:
                       resultado = response.json()
-                      appointment = resultado['appointment']
-                      
+                      appt = resultado['appointment']
                       print("\n✅ RESERVA EXITOSA!")
-                      print(f"   ID: {appointment['id']}")
-                      print(f"   Servicio: {appointment['serviceName']}")
-                      print(f"   Ubicación: {appointment['serviceLocation']['displayName']}")
-                      print(f"   Inicio: {appointment['startTime']['dateTime']}")
-                      print(f"   Fin: {appointment['endTime']['dateTime']}")
-                      print(f"   Ocupación: {appointment['filledAttendeesCount']}/{appointment['maximumAttendeesCount']}")
-                      
-                      # Guardar resultado
+                      print(f"   ID        : {appt['id']}")
+                      print(f"   Servicio  : {appt['serviceName']}")
+                      print(f"   Ubicación : {appt['serviceLocation']['displayName']}")
+                      print(f"   Inicio    : {appt['startTime']['dateTime']}")
+                      print(f"   Fin       : {appt['endTime']['dateTime']}")
+                      print(f"   Ocupación : {appt['filledAttendeesCount']}/{appt['maximumAttendeesCount']}")
                       with open('resultado.json', 'w') as f:
                           json.dump({
                               'success': True,
-                              'appointment_id': appointment['id'],
-                              'service_name': appointment['serviceName'],
-                              'location': appointment['serviceLocation']['displayName'],
-                              'start_time': appointment['startTime']['dateTime'],
-                              'end_time': appointment['endTime']['dateTime'],
-                              'filled': appointment['filledAttendeesCount'],
-                              'max': appointment['maximumAttendeesCount']
+                              'appointment_id': appt['id'],
+                              'service_name': appt['serviceName'],
+                              'location': appt['serviceLocation']['displayName'],
+                              'start_time': appt['startTime']['dateTime'],
+                              'end_time': appt['endTime']['dateTime'],
+                              'filled': appt['filledAttendeesCount'],
+                              'max': appt['maximumAttendeesCount'],
+                              'service_id_used': service_id,
+                              'staff_id_used': staff_id,
                           }, f, indent=2)
-                      
                       return 0
+
                   else:
-                      print(f"\n❌ ERROR: Status code {response.status_code}")
-                      print(f"   Respuesta: {response.text}")
-                      
+                      print(f"\n❌ ERROR HTTP {response.status_code}")
+                      print(f"   Respuesta : {response.text}")
+                      # Si sigue fallando, imprimir IDs usados para depuración
+                      print(f"   service_id usado    : {service_id}")
+                      print(f"   staff_member usado  : {staff_id}")
                       with open('resultado.json', 'w') as f:
                           json.dump({
                               'success': False,
                               'error': f"HTTP {response.status_code}",
-                              'message': response.text
+                              'message': response.text,
+                              'service_id_used': service_id,
+                              'staff_id_used': staff_id,
                           }, f, indent=2)
-                      
                       return 1
-                      
+
               except Exception as e:
-                  print(f"\n❌ EXCEPCIÓN: {str(e)}")
-                  
+                  print(f"\n❌ EXCEPCIÓN: {e}")
                   with open('resultado.json', 'w') as f:
-                      json.dump({
-                          'success': False,
-                          'error': 'Exception',
-                          'message': str(e)
-                      }, f, indent=2)
-                  
+                      json.dump({'success': False, 'error': 'Exception', 'message': str(e)}, f, indent=2)
                   return 1
 
           if __name__ == '__main__':
               sys.exit(hacer_reserva())
           EOF
-      
+
       - name: Ejecutar reserva
         env:
-          CUSTOMER_NAME: ${{ secrets.CUSTOMER_NAME }}
+          CUSTOMER_NAME:  ${{ secrets.CUSTOMER_NAME }}
           CUSTOMER_EMAIL: ${{ secrets.CUSTOMER_EMAIL }}
-          CUSTOMER_DNI: ${{ secrets.CUSTOMER_DNI }}
+          CUSTOMER_DNI:   ${{ secrets.CUSTOMER_DNI }}
         run: python reserva.py
-      
+
       - name: Mostrar resultado
         if: always()
         run: |
@@ -221,7 +313,7 @@ jobs:
             echo "No se generó archivo de resultado"
           fi
           echo "=========================================="
-      
+
       - name: Guardar resultado como artifact
         if: always()
         uses: actions/upload-artifact@v4
